@@ -1,131 +1,122 @@
 import { useState } from "react";
 import { supabase } from "../lib/supabase";
-import { ensureProfile } from "../lib/auth";
 import { useNavigate } from "react-router-dom";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Badge } from "@/components/ui/badge";
+import { toast } from "sonner";
 
 export default function Login() {
   const [mode, setMode] = useState("login"); // login | signup
-  const [role, setRole] = useState("student"); // for signup
+  const [role, setRole] = useState("student");
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
-  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
   const navigate = useNavigate();
 
   async function onSubmit(e) {
     e.preventDefault();
-    setMsg("");
+    setBusy(true);
 
     try {
       if (mode === "signup") {
         const { error } = await supabase.auth.signUp({
           email,
           password: pass,
+          options: {
+            data: { full_name: fullName, role },
+          },
         });
         if (error) throw error;
 
-        // After signup, user may need email confirmation depending on settings.
-        // For student project, usually email confirmation is off OR you can test with same session.
-        // Try create profile (if session exists)
-        await ensureProfile({ full_name: fullName, role });
-
-        setMsg("Signup successful. If login doesn’t work, confirm email (Supabase Auth settings).");
-        navigate("/");
+        toast.success("Signup successful. Now login.");
+        setMode("login");
       } else {
         const { error } = await supabase.auth.signInWithPassword({
           email,
           password: pass,
         });
         if (error) throw error;
+
+        toast.success("Welcome back!");
         navigate("/");
       }
     } catch (err) {
-      setMsg(err.message || "Something went wrong");
+      toast.error(err.message || "Something went wrong");
+    } finally {
+      setBusy(false);
     }
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4">
-      <div className="w-full max-w-md bg-white border rounded-2xl shadow-sm p-6">
-        <div className="text-2xl font-semibold">Faculty Portal</div>
-        <div className="text-sm text-gray-600 mt-1">
-          {mode === "login" ? "Login" : "Create account"}
-        </div>
+    <div className="min-h-screen bg-gradient-to-br from-primary/10 via-background to-secondary/30 flex items-center justify-center p-4">
+      <div className="w-full max-w-md">
+        <Card className="shadow-xl">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-2xl">Faculty Portal</CardTitle>
+              <Badge variant="secondary">Premium UI</Badge>
+            </div>
+            <div className="text-sm text-muted-foreground">
+              {mode === "login" ? "Login to continue" : "Create your account"}
+            </div>
+          </CardHeader>
 
-        <form className="mt-6 space-y-3" onSubmit={onSubmit}>
-          {mode === "signup" && (
-            <>
-              <input
-                className="w-full border rounded-xl px-3 py-2"
-                placeholder="Full name"
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                required
-              />
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setRole("student")}
-                  className={`flex-1 px-3 py-2 rounded-xl border ${
-                    role === "student" ? "bg-gray-900 text-white" : "bg-white"
-                  }`}
-                >
-                  Student
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRole("teacher")}
-                  className={`flex-1 px-3 py-2 rounded-xl border ${
-                    role === "teacher" ? "bg-gray-900 text-white" : "bg-white"
-                  }`}
-                >
-                  Teacher
-                </button>
+          <CardContent>
+            <Tabs value={mode} onValueChange={setMode}>
+              <TabsList className="grid grid-cols-2 w-full">
+                <TabsTrigger value="login">Login</TabsTrigger>
+                <TabsTrigger value="signup">Sign up</TabsTrigger>
+              </TabsList>
+            </Tabs>
+
+            <form className="mt-6 space-y-4" onSubmit={onSubmit}>
+              {mode === "signup" && (
+                <>
+                  <div className="space-y-2">
+                    <Label>Full name</Label>
+                    <Input value={fullName} onChange={(e) => setFullName(e.target.value)} required />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <Button
+                      type="button"
+                      variant={role === "student" ? "default" : "outline"}
+                      onClick={() => setRole("student")}
+                    >
+                      Student
+                    </Button>
+                    <Button
+                      type="button"
+                      variant={role === "teacher" ? "default" : "outline"}
+                      onClick={() => setRole("teacher")}
+                    >
+                      Teacher
+                    </Button>
+                  </div>
+                </>
+              )}
+
+              <div className="space-y-2">
+                <Label>Email</Label>
+                <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required />
               </div>
-            </>
-          )}
 
-          <input
-            className="w-full border rounded-xl px-3 py-2"
-            placeholder="Email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            type="email"
-            required
-          />
-          <input
-            className="w-full border rounded-xl px-3 py-2"
-            placeholder="Password"
-            value={pass}
-            onChange={(e) => setPass(e.target.value)}
-            type="password"
-            required
-          />
+              <div className="space-y-2">
+                <Label>Password</Label>
+                <Input type="password" value={pass} onChange={(e) => setPass(e.target.value)} required />
+              </div>
 
-          <button className="w-full px-3 py-2 rounded-xl bg-gray-900 text-white">
-            {mode === "login" ? "Login" : "Sign up"}
-          </button>
-        </form>
-
-        {msg && <div className="mt-3 text-sm text-red-600">{msg}</div>}
-
-        <div className="mt-4 text-sm text-gray-700">
-          {mode === "login" ? (
-            <>
-              No account?{" "}
-              <button className="underline" onClick={() => setMode("signup")}>
-                Sign up
-              </button>
-            </>
-          ) : (
-            <>
-              Already have an account?{" "}
-              <button className="underline" onClick={() => setMode("login")}>
-                Login
-              </button>
-            </>
-          )}
-        </div>
+              <Button className="w-full" disabled={busy}>
+                {busy ? "Please wait..." : mode === "login" ? "Login" : "Create account"}
+              </Button>
+            </form>
+          </CardContent>
+        </Card>
       </div>
     </div>
   );
