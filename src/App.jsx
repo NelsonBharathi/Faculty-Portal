@@ -33,7 +33,7 @@ export default function App() {
   if (loading) return <div className="p-6">Loading…</div>;
 
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={import.meta.env.BASE_URL}>
       {/* ✅ Toast notifications will work from any page */}
       <Toaster richColors position="top-right" />
 
