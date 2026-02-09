@@ -1,337 +1,256 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
-import Navbar from "../components/Navbar";
-import { getMyProfile } from "../lib/auth";
 import { supabase } from "../lib/supabase";
-import { uploadToBucket } from "./_fileHelpers";
+
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
+import { toast } from "sonner";
+
+const BUCKET = "project-reports"; // ✅ must match bucket
+
+async function signedUrlForPath(path) {
+  const clean = (path || "").replace(/^\/+/, "");
+  const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(clean, 60 * 10);
+  if (error) throw error;
+  return data.signedUrl;
+}
 
 export default function Projects() {
-  const { moduleId } = useParams();
-  const [profile, setProfile] = useState(null);
-  const [module, setModule] = useState(null);
+  const [user, setUser] = useState(null);
+  const [role, setRole] = useState(null);
+  const isTeacher = role === "teacher";
 
-  const [projects, setProjects] = useState([]);
-  const [gradesByProject, setGradesByProject] = useState({}); // { projectId: grade }
+  const [items, setItems] = useState([]);
 
-  // student upload project
+  // student submission fields
   const [title, setTitle] = useState("");
   const [desc, setDesc] = useState("");
-  const [demoUrl, setDemoUrl] = useState("");
-  const [reportFile, setReportFile] = useState(null);
-
-  // teacher grading
-  const [marksById, setMarksById] = useState({});
-  const [fbById, setFbById] = useState({});
-
-  const [msg, setMsg] = useState("");
-
-  const bucket = "project-reports";
-  const isTeacher = profile?.role === "teacher";
-  const isStudent = profile?.role === "student";
-
-  async function load() {
-    const p = await getMyProfile();
-    setProfile(p);
-
-    const { data: m } = await supabase
-      .from("modules")
-      .select("*")
-      .eq("id", moduleId)
-      .single();
-    setModule(m);
-
-    const { data: pr } = await supabase
-      .from("projects")
-      .select("*")
-      .eq("module_id", moduleId)
-      .order("created_at", { ascending: false });
-
-    setProjects(pr || []);
-
-    const gradeMap = {};
-    for (const proj of pr || []) {
-      const { data: g } = await supabase
-        .from("project_grades")
-        .select("*")
-        .eq("project_id", proj.id)
-        .maybeSingle();
-      if (g) gradeMap[proj.id] = g;
-    }
-    setGradesByProject(gradeMap);
-
-    // prefill teacher UI
-    if (p?.role === "teacher") {
-      const m1 = {};
-      const f1 = {};
-      for (const proj of pr || []) {
-        const g = gradeMap[proj.id];
-        if (g) {
-          m1[proj.id] = g.marks;
-          f1[proj.id] = g.feedback || "";
-        } else {
-          m1[proj.id] = "";
-          f1[proj.id] = "";
-        }
-      }
-      setMarksById(m1);
-      setFbById(f1);
-    }
-  }
+  const [repoUrl, setRepoUrl] = useState("");
+  const [liveUrl, setLiveUrl] = useState("");
+  const [demoUrl, setDemoUrl] = useState(""); // optional external video link
+  const [reportFile, setReportFile] = useState(null); // pdf
 
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [moduleId]);
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      if (!data?.user) return;
+      setUser(data.user);
 
-  async function submitProject() {
-    setMsg("");
+      const { data: prof } = await supabase.from("profiles").select("role").eq("id", data.user.id).single();
+      setRole(prof?.role || null);
+    })();
+  }, []);
+
+  const refresh = async () => {
+    const { data, error } = await supabase
+      .from("project_submissions")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) return toast.error(error.message);
+    setItems(data || []);
+  };
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const submitProject = async () => {
     try {
-      if (!isStudent) throw new Error("Only students can upload projects");
-      if (!title.trim()) throw new Error("Enter project title");
+      if (!user?.id) return toast.error("Login required");
+      if (isTeacher) return toast.error("Teacher cannot submit project");
+      if (!title.trim()) return toast.error("Title required");
+      if (!reportFile) return toast.error("Report PDF required");
 
-      let report_path = null;
-      if (reportFile) {
-        const up = await uploadToBucket({
-          bucket,
-          file: reportFile,
-          folderPrefix: `${moduleId}/${profile.id}`,
-        });
-        report_path = up.path;
-      }
+      const ext = reportFile.name.split(".").pop() || "pdf";
+      const key = `${user.id}/${Date.now()}-${crypto.randomUUID()}.${ext}`;
 
-      const { error } = await supabase.from("projects").insert([
-        {
-          module_id: moduleId,
-          title: title.trim(),
-          description: desc.trim() || null,
-          demo_url: demoUrl.trim() || null,
-          report_path,
-          student_id: profile.id,
-        },
-      ]);
+      const { error: upErr } = await supabase.storage.from(BUCKET).upload(key, reportFile, {
+        upsert: false,
+        contentType: reportFile.type || "application/pdf",
+      });
+      if (upErr) throw upErr;
+
+      const { error } = await supabase.from("project_submissions").insert({
+        student_id: user.id,
+        title: title.trim(),
+        description: desc?.trim() || null,
+        repo_url: repoUrl?.trim() || null,
+        live_url: liveUrl?.trim() || null,
+        demo_url: demoUrl?.trim() || null,
+        report_path: key,
+        created_at: new Date().toISOString(),
+      });
+
       if (error) throw error;
 
+      toast.success("Project submitted");
       setTitle("");
       setDesc("");
+      setRepoUrl("");
+      setLiveUrl("");
       setDemoUrl("");
       setReportFile(null);
-      setMsg("Project uploaded!");
-      await load();
+      await refresh();
     } catch (e) {
-      setMsg(e.message || "Upload failed");
+      console.error(e);
+      toast.error(e.message || "Submit failed");
     }
-  }
+  };
 
-  async function openSigned(path) {
-    const { data, error } = await supabase.storage
-      .from(bucket)
-      .createSignedUrl(path, 60 * 30);
-    if (error) return alert(error.message);
-    window.open(data.signedUrl, "_blank");
-  }
-
-  async function saveGrade(projectId) {
-    setMsg("");
+  const openReport = async (row) => {
     try {
-      if (!isTeacher) throw new Error("Only teacher can grade");
-      const marks = Number(marksById[projectId]);
-      if (Number.isNaN(marks) || marks < 0) throw new Error("Enter valid marks (0 or more)");
+      if (!row?.report_path) return toast.error("No report path");
+      const url = await signedUrlForPath(row.report_path); // ✅ fixed
+      window.open(url, "_blank");
+    } catch (e) {
+      console.error(e);
+      toast.error(e.message || "Cannot open report");
+    }
+  };
 
-      // Upsert: insert if not exists, else update
+  const saveTeacherReview = async (rowId, patch) => {
+    try {
+      if (!isTeacher) return toast.error("Only teacher");
       const { error } = await supabase
-        .from("project_grades")
-        .upsert(
-          [
-            {
-              project_id: projectId,
-              teacher_id: profile.id,
-              marks,
-              feedback: fbById[projectId] || null,
-            },
-          ],
-          { onConflict: "project_id" }
-        );
+        .from("project_submissions")
+        .update({
+          ...patch,
+          graded_by: user?.id,
+          graded_at: new Date().toISOString(),
+        })
+        .eq("id", rowId);
 
       if (error) throw error;
-      setMsg("Grade saved!");
-      await load();
+      toast.success("Saved");
+      await refresh();
     } catch (e) {
-      setMsg(e.message || "Failed");
+      console.error(e);
+      toast.error(e.message || "Save failed");
     }
-  }
+  };
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <Navbar title={module?.name || "Projects"} profile={profile} />
+    <div className="mx-auto max-w-5xl p-4 space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">Projects</h1>
+          <p className="text-sm text-muted-foreground">
+            Students submit report + links. Teacher verifies and gives marks.
+          </p>
+        </div>
+        <Button variant="outline" onClick={refresh}>
+          Refresh
+        </Button>
+      </div>
 
-      <div className="max-w-5xl mx-auto px-4 py-6 space-y-6">
-        {msg && (
-          <div className="bg-white border rounded-2xl p-3 text-sm text-gray-700">
-            {msg}
-          </div>
-        )}
-
-        {isStudent && (
-          <div className="bg-white border rounded-2xl p-4">
-            <div className="font-semibold">Upload Mini Project</div>
-            <div className="text-sm text-gray-600">
-              Add a demo link (YouTube/GitHub Pages) and upload report if needed.
+      {!isTeacher && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Submit Project</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            <Input placeholder="Project title" value={title} onChange={(e) => setTitle(e.target.value)} />
+            <Textarea placeholder="Description" value={desc} onChange={(e) => setDesc(e.target.value)} />
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <Input placeholder="Repo URL (optional)" value={repoUrl} onChange={(e) => setRepoUrl(e.target.value)} />
+              <Input placeholder="Live URL (optional)" value={liveUrl} onChange={(e) => setLiveUrl(e.target.value)} />
+              <Input placeholder="Demo video link (optional)" value={demoUrl} onChange={(e) => setDemoUrl(e.target.value)} />
             </div>
+            <Input type="file" accept="application/pdf" onChange={(e) => setReportFile(e.target.files?.[0] || null)} />
+            <Button onClick={submitProject}>Submit</Button>
+          </CardContent>
+        </Card>
+      )}
 
-            <div className="mt-3 grid md:grid-cols-2 gap-2">
-              <input
-                className="border rounded-xl px-3 py-2"
-                placeholder="Project title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-              />
-              <input
-                className="border rounded-xl px-3 py-2"
-                placeholder="Demo URL (optional)"
-                value={demoUrl}
-                onChange={(e) => setDemoUrl(e.target.value)}
-              />
-              <input
-                className="border rounded-xl px-3 py-2 md:col-span-2"
-                placeholder="Description (optional)"
-                value={desc}
-                onChange={(e) => setDesc(e.target.value)}
-              />
-              <input
-                className="border rounded-xl px-3 py-2 md:col-span-1"
-                type="file"
-                onChange={(e) => setReportFile(e.target.files?.[0] || null)}
-              />
-              <button
-                className="rounded-xl bg-gray-900 text-white px-3 py-2 md:col-span-1"
-                onClick={submitProject}
-              >
-                Upload
-              </button>
-            </div>
-          </div>
-        )}
-
-        <div className="bg-white border rounded-2xl p-4">
-          <div className="font-semibold">Submitted Projects</div>
-
-          <div className="mt-3 space-y-3">
-            {projects.length === 0 ? (
-              <div className="text-sm text-gray-600">No projects yet.</div>
-            ) : (
-              projects.map((p) => {
-                const g = gradesByProject[p.id];
-                return (
-                  <div key={p.id} className="border rounded-2xl p-4">
-                    <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
-                      <div>
-                        <div className="font-medium text-lg">{p.title}</div>
-                        {p.description && (
-                          <div className="text-sm text-gray-700 mt-1">{p.description}</div>
-                        )}
-                        <div className="text-xs text-gray-500 mt-1">
-                          Student: {p.student_id.slice(0, 8)}… • Submitted:{" "}
-                          {new Date(p.created_at).toLocaleString()}
-                        </div>
-
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {p.demo_url && (
-                            <a
-                              className="px-3 py-1.5 rounded-lg border"
-                              href={p.demo_url}
-                              target="_blank"
-                              rel="noreferrer"
-                            >
-                              Open Demo
-                            </a>
-                          )}
-                          {p.report_path && (
-                            <button
-                              className="px-3 py-1.5 rounded-lg border"
-                              onClick={() => openSigned(p.report_path)}
-                            >
-                              View Report
-                            </button>
-                          )}
-                        </div>
-
-                        {g && (
-                          <div className="mt-3 bg-gray-50 border rounded-xl p-3">
-                            <div className="text-sm font-semibold">
-                              Grade: {g.marks}
-                            </div>
-                            {g.feedback && (
-                              <div className="text-sm text-gray-700 mt-1">
-                                Feedback: {g.feedback}
-                              </div>
-                            )}
-                            <div className="text-xs text-gray-500 mt-1">
-                              Graded: {new Date(g.graded_at).toLocaleString()}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-
-                      {isTeacher && (
-                        <div className="w-full md:w-80 bg-white border rounded-2xl p-3">
-                          <div className="font-semibold text-sm">Assess</div>
-                          <div className="mt-2 space-y-2">
-                            <input
-                              className="w-full border rounded-xl px-3 py-2"
-                              placeholder="Marks"
-                              type="number"
-                              value={marksById[p.id] ?? ""}
-                              onChange={(e) =>
-                                setMarksById((prev) => ({
-                                  ...prev,
-                                  [p.id]: e.target.value,
-                                }))
-                              }
-                            />
-                            <textarea
-                              className="w-full border rounded-xl px-3 py-2"
-                              placeholder="Feedback (optional)"
-                              rows={3}
-                              value={fbById[p.id] ?? ""}
-                              onChange={(e) =>
-                                setFbById((prev) => ({
-                                  ...prev,
-                                  [p.id]: e.target.value,
-                                }))
-                              }
-                            />
-                            <button
-                              className="w-full rounded-xl bg-gray-900 text-white px-3 py-2"
-                              onClick={() => saveGrade(p.id)}
-                            >
-                              Save Grade
-                            </button>
-                          </div>
-
-                          <button
-                            className="mt-3 w-full px-3 py-2 rounded-xl border text-red-600"
-                            onClick={async () => {
-                              // teacher can delete project if needed
-                              await supabase.from("projects").delete().eq("id", p.id);
-                              // optional: remove report file
-                              if (p.report_path) {
-                                await supabase.storage.from(bucket).remove([p.report_path]);
-                              }
-                              await load();
-                            }}
-                          >
-                            Delete Project
-                          </button>
-                        </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>Submissions</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {items.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No project submissions yet.</p>
+          ) : (
+            items.map((p) => (
+              <div key={p.id} className="border rounded-xl p-4 space-y-2">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="font-semibold">{p.title}</div>
+                    {p.description && <div className="text-sm text-muted-foreground">{p.description}</div>}
+                    <div className="text-sm text-muted-foreground mt-1">
+                      Student: {p.student_id}
+                    </div>
+                    <div className="text-sm mt-2 flex flex-wrap gap-3">
+                      {p.repo_url && (
+                        <a className="underline" href={p.repo_url} target="_blank" rel="noreferrer">
+                          Repo
+                        </a>
+                      )}
+                      {p.live_url && (
+                        <a className="underline" href={p.live_url} target="_blank" rel="noreferrer">
+                          Live
+                        </a>
+                      )}
+                      {p.demo_url && (
+                        <a className="underline" href={p.demo_url} target="_blank" rel="noreferrer">
+                          Demo Video
+                        </a>
+                      )}
+                      {p.report_path && (
+                        <button className="underline" onClick={() => openReport(p)}>
+                          Open Report
+                        </button>
                       )}
                     </div>
                   </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-      </div>
+
+                  <div className="text-sm text-muted-foreground">
+                    Marks: {p.marks ?? "—"} • Verified: {p.verified ? "Yes" : "No"}
+                  </div>
+                </div>
+
+                {isTeacher && (
+                  <div className="flex flex-col md:flex-row gap-2 md:items-center pt-2 border-t">
+                    <label className="flex items-center gap-2 text-sm">
+                      <Checkbox
+                        checked={!!p.verified}
+                        onCheckedChange={(v) =>
+                          saveTeacherReview(p.id, {
+                            verified: !!v,
+                            verified_by: user?.id,
+                            verified_at: new Date().toISOString(),
+                          })
+                        }
+                      />
+                      Verified
+                    </label>
+
+                    <Input
+                      type="number"
+                      min={0}
+                      placeholder="Marks"
+                      defaultValue={p.marks ?? ""}
+                      onBlur={(e) =>
+                        saveTeacherReview(p.id, { marks: e.target.value === "" ? null : Number(e.target.value) })
+                      }
+                      className="w-32"
+                    />
+
+                    <Input
+                      placeholder="Feedback"
+                      defaultValue={p.feedback ?? ""}
+                      onBlur={(e) => saveTeacherReview(p.id, { feedback: e.target.value || null })}
+                      className="w-72"
+                    />
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

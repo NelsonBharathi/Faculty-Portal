@@ -4,10 +4,6 @@ import path from "path";
 
 export default defineConfig({
   plugins: [react()],
-
-  // ✅ IMPORTANT: must match your GitHub repo name EXACTLY (case-sensitive)
-  base: "/Faculty-Portal/",
-
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

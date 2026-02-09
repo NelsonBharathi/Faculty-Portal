@@ -1,334 +1,342 @@
-import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
-import Navbar from "../components/Navbar";
-import { getMyProfile } from "../lib/auth";
+import { useEffect, useState } from "react";
 import { supabase } from "../lib/supabase";
-import { uploadToBucket } from "./_fileHelpers";
+
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Checkbox } from "@/components/ui/checkbox";
+import { toast } from "sonner";
+
+const BUCKET = "hw-submissions"; // ✅ must match bucket
+
+function toIsoDeadline(dateStr, hh, mm) {
+  if (!dateStr) return null;
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(y, m - 1, d, Number(hh || 0), Number(mm || 0), 0);
+  return dt.toISOString();
+}
+
+async function signedUrlForPath(path) {
+  const clean = (path || "").replace(/^\/+/, "");
+  const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(clean, 60 * 10);
+  if (error) throw error;
+  return data.signedUrl;
+}
 
 export default function Homework() {
-  const { moduleId } = useParams();
-  const [profile, setProfile] = useState(null);
-  const [module, setModule] = useState(null);
+  const [user, setUser] = useState(null);
+  const [role, setRole] = useState(null);
+  const isTeacher = role === "teacher";
 
   const [homeworks, setHomeworks] = useState([]);
-  const [submissionsByHw, setSubmissionsByHw] = useState({}); // { hwId: [] }
+  const [subsByHomework, setSubsByHomework] = useState({});
+  const [openFor, setOpenFor] = useState(null);
 
-  // teacher create homework
+  // create homework
   const [title, setTitle] = useState("");
   const [desc, setDesc] = useState("");
-  const [deadline, setDeadline] = useState(""); // datetime-local string
-  const [points, setPoints] = useState(10);
+  const [maxSubs, setMaxSubs] = useState(1);
+  const [deadlineDate, setDeadlineDate] = useState("");
+  const [deadlineH, setDeadlineH] = useState("09");
+  const [deadlineM, setDeadlineM] = useState("00");
 
-  // student submission
-  const [fileByHw, setFileByHw] = useState({}); // { hwId: File }
-  const [msg, setMsg] = useState("");
-
-  const bucket = "hw-submissions";
-
-  const isTeacher = profile?.role === "teacher";
-  const isStudent = profile?.role === "student";
-
-  async function load() {
-    const p = await getMyProfile();
-    setProfile(p);
-
-    const { data: m } = await supabase
-      .from("modules")
-      .select("*")
-      .eq("id", moduleId)
-      .single();
-    setModule(m);
-
-    const { data: hws } = await supabase
-      .from("homeworks")
-      .select("*")
-      .eq("module_id", moduleId)
-      .order("created_at", { ascending: false });
-
-    setHomeworks(hws || []);
-
-    // Load submissions per homework
-    const map = {};
-    for (const hw of hws || []) {
-      const { data: subs } = await supabase
-        .from("homework_submissions")
-        .select("*")
-        .eq("homework_id", hw.id)
-        .order("submitted_at", { ascending: false });
-
-      map[hw.id] = subs || [];
-    }
-    setSubmissionsByHw(map);
-  }
+  // student submit
+  const [fileByHomework, setFileByHomework] = useState({});
 
   useEffect(() => {
-    load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [moduleId]);
+    (async () => {
+      const { data } = await supabase.auth.getUser();
+      if (!data?.user) return;
+      setUser(data.user);
 
-  function isLate(hw) {
-    const dl = new Date(hw.deadline).getTime();
-    return Date.now() > dl;
-  }
+      const { data: prof } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", data.user.id)
+        .single();
+      setRole(prof?.role || null);
+    })();
+  }, []);
 
-  async function createHomework() {
-    setMsg("");
+  const refresh = async () => {
+    const { data, error } = await supabase.from("homeworks").select("*").order("created_at", { ascending: false });
+    if (error) return toast.error(error.message);
+    setHomeworks(data || []);
+  };
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const createHomework = async () => {
     try {
-      if (!isTeacher) throw new Error("Only teacher can create homework");
-      if (!title.trim()) throw new Error("Enter title");
-      if (!deadline) throw new Error("Set deadline");
+      if (!isTeacher) return toast.error("Only teacher can create homework");
+      if (!title.trim()) return toast.error("Title required");
+      if (!deadlineDate) return toast.error("Deadline date required");
 
-      const dlISO = new Date(deadline).toISOString();
+      const deadlineIso = toIsoDeadline(deadlineDate, deadlineH, deadlineM);
 
-      const { error } = await supabase.from("homeworks").insert([
-        {
-          module_id: moduleId,
-          title: title.trim(),
-          description: desc.trim() || null,
-          deadline: dlISO,
-          points: Number(points) || 0,
-          created_by: profile.id,
-        },
-      ]);
-      if (error) throw error;
-
-      setTitle("");
-      setDesc("");
-      setDeadline("");
-      setPoints(10);
-      setMsg("Homework created!");
-      await load();
-    } catch (e) {
-      setMsg(e.message || "Failed");
-    }
-  }
-
-  async function submit(hw) {
-    setMsg("");
-    try {
-      if (!isStudent) throw new Error("Only students can submit");
-      if (isLate(hw)) throw new Error("Deadline passed. Submission closed.");
-      const file = fileByHw[hw.id];
-      if (!file) throw new Error("Choose a file");
-
-      const up = await uploadToBucket({
-        bucket,
-        file,
-        folderPrefix: `${moduleId}/${hw.id}/${profile.id}`,
+      const { error } = await supabase.from("homeworks").insert({
+        title: title.trim(),
+        description: desc?.trim() || null,
+        max_submissions: Number(maxSubs || 1),
+        deadline: deadlineIso,
+        created_by: user?.id,
       });
 
-      const { error } = await supabase.from("homework_submissions").insert([
-        {
-          homework_id: hw.id,
-          student_id: profile.id,
-          file_path: up.path,
-        },
-      ]);
       if (error) throw error;
 
-      setFileByHw((prev) => ({ ...prev, [hw.id]: null }));
-      setMsg("Submitted!");
-      await load();
+      toast.success("Homework created");
+      setTitle("");
+      setDesc("");
+      setMaxSubs(1);
+      await refresh();
     } catch (e) {
-      setMsg(e.message || "Submit failed");
+      console.error(e);
+      toast.error(e.message || "Create failed");
     }
-  }
+  };
 
-  async function openSigned(path) {
-    const { data, error } = await supabase.storage
-      .from(bucket)
-      .createSignedUrl(path, 60 * 30);
-    if (error) return alert(error.message);
-    window.open(data.signedUrl, "_blank");
-  }
+  const loadSubs = async (hwId) => {
+    const { data, error } = await supabase
+      .from("homework_submissions")
+      .select("*")
+      .eq("homework_id", hwId)
+      .order("submitted_at", { ascending: false });
 
-  const mySubmissionsCount = useMemo(() => {
-    if (!isStudent) return null;
-    let c = 0;
-    for (const hw of homeworks) {
-      const subs = submissionsByHw[hw.id] || [];
-      c += subs.filter((s) => s.student_id === profile.id).length;
+    if (error) return toast.error(error.message);
+    setSubsByHomework((p) => ({ ...p, [hwId]: data || [] }));
+  };
+
+  const submitHomework = async (hw) => {
+    try {
+      if (!user?.id) return toast.error("Login required");
+      if (isTeacher) return toast.error("Teacher cannot submit");
+      const file = fileByHomework[hw.id];
+      if (!file) return toast.error("Choose a file");
+
+      // enforce max submissions per student
+      const { data: countRows } = await supabase
+        .from("homework_submissions")
+        .select("id", { count: "exact", head: true })
+        .eq("homework_id", hw.id)
+        .eq("student_id", user.id);
+
+      // count is not always returned in data; do a safer query
+      const { data: existing, error: exErr } = await supabase
+        .from("homework_submissions")
+        .select("id")
+        .eq("homework_id", hw.id)
+        .eq("student_id", user.id);
+
+      if (exErr) throw exErr;
+      if ((existing?.length || 0) >= Number(hw.max_submissions || 1)) {
+        return toast.error("You reached max submissions for this homework");
+      }
+
+      const ext = file.name.split(".").pop() || "bin";
+      const key = `${hw.id}/${user.id}/${Date.now()}-${crypto.randomUUID()}.${ext}`;
+
+      const { error: upErr } = await supabase.storage.from(BUCKET).upload(key, file, {
+        upsert: false,
+        contentType: file.type || "application/octet-stream",
+      });
+      if (upErr) throw upErr;
+
+      const { error } = await supabase.from("homework_submissions").insert({
+        homework_id: hw.id,
+        student_id: user.id,
+        file_path: key,
+        submitted_at: new Date().toISOString(),
+      });
+
+      if (error) throw error;
+
+      toast.success("Submitted");
+      setFileByHomework((p) => ({ ...p, [hw.id]: null }));
+      if (openFor === hw.id) await loadSubs(hw.id);
+    } catch (e) {
+      console.error(e);
+      toast.error(e.message || "Submit failed");
     }
-    return c;
-  }, [homeworks, submissionsByHw, isStudent, profile]);
+  };
+
+  const openFile = async (row) => {
+    try {
+      const url = await signedUrlForPath(row.file_path); // ✅ fixed
+      window.open(url, "_blank");
+    } catch (e) {
+      console.error(e);
+      toast.error(e.message || "Cannot open file");
+    }
+  };
+
+  const setVerified = async (rowId, v) => {
+    try {
+      if (!isTeacher) return toast.error("Only teacher");
+      const { error } = await supabase
+        .from("homework_submissions")
+        .update({
+          verified: !!v,
+          verified_by: user?.id,
+          verified_at: new Date().toISOString(),
+        })
+        .eq("id", rowId);
+
+      if (error) throw error;
+      toast.success("Saved");
+      if (openFor) await loadSubs(openFor);
+    } catch (e) {
+      console.error(e);
+      toast.error(e.message || "Save failed");
+    }
+  };
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <Navbar title={module?.name || "Homework"} profile={profile} />
+    <div className="mx-auto max-w-5xl p-4 space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold">Homework</h1>
+          <p className="text-sm text-muted-foreground">
+            Teacher creates homework. Students submit. Teacher verifies submissions.
+          </p>
+        </div>
+        <Button variant="outline" onClick={refresh}>
+          Refresh
+        </Button>
+      </div>
 
-      <div className="max-w-5xl mx-auto px-4 py-6 space-y-6">
-        {msg && (
-          <div className="bg-white border rounded-2xl p-3 text-sm text-gray-700">
-            {msg}
-          </div>
-        )}
-
-        {isStudent && (
-          <div className="bg-white border rounded-2xl p-4">
-            <div className="font-semibold">Your submissions</div>
-            <div className="text-sm text-gray-600">
-              Total submissions made: {mySubmissionsCount ?? 0}
-            </div>
-          </div>
-        )}
-
-        {isTeacher && (
-          <div className="bg-white border rounded-2xl p-4">
-            <div className="font-semibold">Create Homework</div>
-            <div className="mt-3 grid md:grid-cols-2 gap-2">
-              <input
-                className="border rounded-xl px-3 py-2"
-                placeholder="Title"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-              />
-              <input
-                className="border rounded-xl px-3 py-2"
-                placeholder="Points"
+      {isTeacher && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Create Homework</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Input placeholder="Homework title" value={title} onChange={(e) => setTitle(e.target.value)} />
+              <Input
                 type="number"
-                value={points}
-                onChange={(e) => setPoints(e.target.value)}
+                min={1}
+                placeholder="Max submissions (per student)"
+                value={maxSubs}
+                onChange={(e) => setMaxSubs(e.target.value)}
               />
-              <input
-                className="border rounded-xl px-3 py-2 md:col-span-2"
-                placeholder="Description (optional)"
-                value={desc}
-                onChange={(e) => setDesc(e.target.value)}
-              />
-              <input
-                className="border rounded-xl px-3 py-2"
-                type="datetime-local"
-                value={deadline}
-                onChange={(e) => setDeadline(e.target.value)}
-              />
-              <button
-                className="rounded-xl bg-gray-900 text-white px-3 py-2"
-                onClick={createHomework}
-              >
-                Create
-              </button>
             </div>
-            <div className="text-xs text-gray-500 mt-2">
-              Deadline is based on your device time.
+
+            <Textarea placeholder="Description (optional)" value={desc} onChange={(e) => setDesc(e.target.value)} />
+
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+              <Input type="date" value={deadlineDate} onChange={(e) => setDeadlineDate(e.target.value)} />
+              <Input type="number" min={0} max={23} value={deadlineH} onChange={(e) => setDeadlineH(e.target.value)} />
+              <Input type="number" min={0} max={59} value={deadlineM} onChange={(e) => setDeadlineM(e.target.value)} />
+              <Button onClick={createHomework}>Create</Button>
             </div>
-          </div>
-        )}
+          </CardContent>
+        </Card>
+      )}
 
-        <div className="bg-white border rounded-2xl p-4">
-          <div className="font-semibold">Homework List</div>
-
-          <div className="mt-3 space-y-3">
-            {homeworks.length === 0 ? (
-              <div className="text-sm text-gray-600">No homework yet.</div>
-            ) : (
-              homeworks.map((hw) => {
-                const subs = submissionsByHw[hw.id] || [];
-                const late = isLate(hw);
-
-                return (
-                  <div key={hw.id} className="border rounded-2xl p-4">
-                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
-                      <div>
-                        <div className="font-medium text-lg">{hw.title}</div>
-                        {hw.description && (
-                          <div className="text-sm text-gray-700 mt-1">
-                            {hw.description}
-                          </div>
-                        )}
-                        <div className="text-xs text-gray-500 mt-1">
-                          Deadline: {new Date(hw.deadline).toLocaleString()} •
-                          Points: {hw.points} •{" "}
-                          <span className={late ? "text-red-600" : "text-green-600"}>
-                            {late ? "Closed" : "Open"}
-                          </span>
-                        </div>
+      <Card>
+        <CardHeader>
+          <CardTitle>Homework List</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {homeworks.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No homework yet.</p>
+          ) : (
+            homeworks.map((hw) => {
+              const subs = subsByHomework[hw.id] || [];
+              return (
+                <div key={hw.id} className="border rounded-xl p-4 space-y-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="font-semibold">{hw.title}</div>
+                      {hw.description && <div className="text-sm text-muted-foreground">{hw.description}</div>}
+                      <div className="text-sm text-muted-foreground mt-1">
+                        Deadline: {hw.deadline ? new Date(hw.deadline).toLocaleString() : "—"} • Max:{" "}
+                        {hw.max_submissions ?? 1}
                       </div>
-
-                      {isStudent && (
-                        <div className="flex flex-col gap-2">
-                          <input
-                            className="border rounded-xl px-3 py-2"
-                            type="file"
-                            onChange={(e) =>
-                              setFileByHw((prev) => ({
-                                ...prev,
-                                [hw.id]: e.target.files?.[0] || null,
-                              }))
-                            }
-                            disabled={late}
-                          />
-                          <button
-                            className="rounded-xl bg-gray-900 text-white px-3 py-2"
-                            onClick={() => submit(hw)}
-                            disabled={late}
-                          >
-                            Submit
-                          </button>
-                        </div>
-                      )}
                     </div>
 
-                    <div className="mt-4">
-                      <div className="text-sm font-semibold">
-                        Submissions ({subs.length})
+                    <div className="flex gap-2">
+                      <Button
+                        variant="secondary"
+                        onClick={async () => {
+                          if (openFor === hw.id) return setOpenFor(null);
+                          setOpenFor(hw.id);
+                          await loadSubs(hw.id);
+                        }}
+                      >
+                        {openFor === hw.id ? "Close" : "View submissions"}
+                      </Button>
+                    </div>
+                  </div>
+
+                  {!isTeacher && (
+                    <div className="flex flex-col md:flex-row gap-2 items-start md:items-center">
+                      <Input
+                        type="file"
+                        accept="application/pdf,image/*"
+                        onChange={(e) =>
+                          setFileByHomework((p) => ({
+                            ...p,
+                            [hw.id]: e.target.files?.[0] || null,
+                          }))
+                        }
+                      />
+                      <Button onClick={() => submitHomework(hw)}>Submit</Button>
+                    </div>
+                  )}
+
+                  {openFor === hw.id && (
+                    <div className="pt-2 border-t space-y-3">
+                      <div className="flex items-center justify-between">
+                        <div className="font-medium">Submissions ({subs.length})</div>
+                        <Button variant="outline" onClick={() => loadSubs(hw.id)}>
+                          Refresh submissions
+                        </Button>
                       </div>
 
                       {subs.length === 0 ? (
-                        <div className="text-sm text-gray-600 mt-1">
-                          No submissions yet.
-                        </div>
+                        <p className="text-sm text-muted-foreground">No submissions yet.</p>
                       ) : (
-                        <div className="mt-2 space-y-2">
-                          {subs.map((s) => (
-                            <div
-                              key={s.id}
-                              className="flex items-center justify-between border rounded-xl p-3"
-                            >
+                        subs.map((s) => (
+                          <div
+                            key={s.id}
+                            className="border rounded-xl p-3 flex flex-col md:flex-row md:items-center md:justify-between gap-3"
+                          >
+                            <div className="space-y-1">
                               <div className="text-sm">
-                                <div className="font-medium">
-                                  Student: {s.student_id.slice(0, 8)}…
-                                </div>
-                                <div className="text-xs text-gray-500">
-                                  Submitted: {new Date(s.submitted_at).toLocaleString()}
-                                </div>
+                                <span className="font-medium">Student:</span> {s.student_id}
                               </div>
-
-                              <div className="flex gap-2">
-                                {(isTeacher || (isStudent && s.student_id === profile?.id)) && (
-                                  <button
-                                    className="px-3 py-1.5 rounded-lg border"
-                                    onClick={() => openSigned(s.file_path)}
-                                  >
-                                    View / Download
-                                  </button>
-                                )}
+                              <div className="text-sm text-muted-foreground">
+                                Submitted:{" "}
+                                {s.submitted_at ? new Date(s.submitted_at).toLocaleString() : "—"}
                               </div>
+                              <Button variant="link" className="p-0 h-auto" onClick={() => openFile(s)}>
+                                Open
+                              </Button>
                             </div>
-                          ))}
-                        </div>
+
+                            {isTeacher ? (
+                              <label className="flex items-center gap-2 text-sm">
+                                <Checkbox checked={!!s.verified} onCheckedChange={(v) => setVerified(s.id, v)} />
+                                Verified
+                              </label>
+                            ) : (
+                              <div className="text-sm text-muted-foreground">Verified: {s.verified ? "Yes" : "No"}</div>
+                            )}
+                          </div>
+                        ))
                       )}
                     </div>
-
-                    {isTeacher && (
-                      <div className="mt-3 flex justify-end">
-                        <button
-                          className="px-3 py-1.5 rounded-lg border text-red-600"
-                          onClick={async () => {
-                            await supabase.from("homeworks").delete().eq("id", hw.id);
-                            await load();
-                          }}
-                        >
-                          Delete Homework
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                );
-              })
-            )}
-          </div>
-        </div>
-      </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
